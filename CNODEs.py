@@ -2,7 +2,7 @@
 """
 Created on Mon Feb 27 14:41:45 2023
 
-@author: HP
+@author: Rodrigo Araiza Bravo
 """
 
 import torch 

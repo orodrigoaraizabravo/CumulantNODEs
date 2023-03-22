@@ -2,10 +2,10 @@
 """
 Created on Fri Mar 17 14:25:16 2023
 
-@author: HP
+@author: Rodrigo Araiza Bravo
 """
 import torch 
-from diff_cumulants_sigma import CumulantNN
+from CNODEs import CumulantNN
 from julia import Main
 from time import time
 import sys 
