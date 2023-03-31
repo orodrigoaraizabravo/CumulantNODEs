@@ -20,7 +20,7 @@ N=5
 times=torch.linspace(0,1,20)
 
 Gs, Fs, Hout= Perceptron_ansatz(N)
-perceptron=EDNN(N, Gs, Fs, Hout)
+perceptron=EDNN(N, Gs, Fs, Hout, constraint=False)
 loss = perceptron.loss(times)
 
 
