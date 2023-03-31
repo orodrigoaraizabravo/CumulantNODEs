@@ -6,11 +6,48 @@ Created on Mon Feb 27 14:41:45 2023
 """
 
 import torch 
-from torch import nn, pi, optim
+from torch import nn, pi#, optim
 from torchdiffeq import odeint, odeint_adjoint
 from torch.special import legendre_polynomial_p as lp
-import numpy as np
+#import numpy as np
 import pickle 
+from math import factorial as fac
+
+def partition(collection):
+    if len(collection) == 1:
+        yield [ collection ]
+        return
+
+    first = collection[0]
+    for smaller in partition(collection[1:]):
+        # insert `first` in each of the subpartition's subsets
+        for n, subset in enumerate(smaller):
+            yield smaller[:n] + [[ first ] + subset]  + smaller[n+1:]
+        # put `first` in its own subset 
+        yield [ [ first ] ] + smaller
+        
+def get_partitions(n,k):
+    ps=[]
+    _ps = partition([i for i in range(1,n+1)])
+    for p in _ps:
+        l = max([len(e) for e in p])
+        if l<=k: ps.append(p)
+    return ps
+
+def cumulant(op,order=2): 
+    #Op = [coeff, *directions,*ops]
+    n=len(op[1:])//2
+    fold = ['σ_'+str(op[1+n+i])+op[1+i] for i in range(n)]
+    if n<=order: s=str(op[0])+'*⟨'+'*'.join(fold)+'⟩'
+    else: 
+        s=str(op[0])+'*('
+        terms=[]
+        for p in get_partitions(n, order): 
+            c = fac(len(p)-1)*(-1)**(len(p)-1+1)
+            prod='*'.join(['⟨'+'*'.join([fold[i] for i in B])+'⟩' for B in p])
+            terms.append(c+'*'+prod)
+        s+= '+'.join(terms)+')'
+    return s
 
 def call_operators(N, Graph, Fields, Main): 
     Main.eval("""σ(i, axis) = Sigma(h,Symbol(:σ_,i), axis, i)""")
@@ -64,16 +101,23 @@ def output_as_string(N,order,Hout,varmap_out):
     
     sHout = 'Hout='
     for i in range(len(Hout)): sHout+=str(Hout[i][0])+'*'+Outops[i]+'+'
+    print(sHout)
         
     Main.eval(sHout[:-1])
     Main.eval("""avgout = cumulant_expansion(average(Hout),order)""")
-    
+    print(Main.avgout)
     s=str(Main.avgout)[15:-1]
     for x in [str(integer) for integer in range(1,10)]: s=s.replace(x+'var', x+'*var').replace(x+'⟨', x+'*⟨')
     for key in varmap_out: 
             s=s.replace(key, varmap_out[key])
     for x in [str(integer) for integer in range(0,10)]: s=s.replace(x+'x', x+'*x')
     return s.replace("⟨","").replace("⟩","").replace("^","**").replace("*)",")").replace(')self',')*self')
+
+def get_output_string(Hout,order,varmap_out):
+    s='+'.join([cumulant(hout, order) for hout in Hout])
+    for key in varmap_out: 
+        s=s.replace(key, varmap_out[key])
+    return s
 
 def call_Main(N, Graph, Fields, Hout, order,Main):
     Main.using("QuantumCumulants")
@@ -207,7 +251,7 @@ class CumulantNN(nn.Module):
         if basis not in ['Legendre', 'Fourier', 'poly']: raise ValueError('Basis ' + basis + ' not supported')
         
         self.get_equations()
-        self.s = eval('lambda x:' + output_as_string(self.n_qubits,self.order,Hout,self.varmap_out))
+        self.s = eval('lambda x:' + get_output_string(Hout, self.order, self.varmap_out))
         
     def J(self,i):
         return (2*torch.sigmoid(self.Js[i])-1)
@@ -280,7 +324,7 @@ class CumulantNN(nn.Module):
     
     
 class EDNN(nn.Module):
-    def __init__(self, N, Graph, Fields, Hout, T=1.0, n_basis = 5, basis='Fourier', x0=None, Js=None, vs=None, method='euler'):
+    def __init__(self, N, Graph, Fields, Hout, T=1.0, n_basis = 5, basis='Fourier', x0=None, Js=None, vs=None, method='euler', constraint=True):
         super(EDNN,self).__init__()
         self.N=N
         self.Graph=Graph
@@ -290,6 +334,7 @@ class EDNN(nn.Module):
         self.n_basis=n_basis
         self.basis=basis
         self.method=method
+        self.constraint=constraint
         
         if Js is None: self.Js  = nn.Parameter(torch.rand(len(self.Graph)))
         else: self.Js = nn.Parameter(Js,requires_grad=True)
@@ -354,7 +399,9 @@ class EDNN(nn.Module):
     def generate_p_constant(self, i):
         """Function for couplings (constant)"""
         def p(t):
-            return (2*torch.sigmoid(self.Js[i])-1)
+            if self.constraint:    
+                return (2*torch.sigmoid(self.Js[i])-1)
+            else: return self.Js[i]
         return p
     
     def generate_p(self,i):
@@ -372,8 +419,9 @@ class EDNN(nn.Module):
                 u = torch.dot(self.vs[i,:],(t/self.T)**torch.arange(self.n_basis))
             elif self.basis == 'Legendre':
                 u = torch.dot(self.vs[i,:],lp(t/self.T, torch.arange(self.n_basis)))
-                
-            return (2*torch.sigmoid(u)-1)
+             
+            if self.constraint: return (2*torch.sigmoid(u)-1)
+            else: return u
         
         return p
     
@@ -400,3 +448,31 @@ class EDNN(nn.Module):
             losses.append(l.detach())
             
         return losses
+    
+def Ising_Ansatz(N, fields=['x'] ,platform = 'Python'): 
+    s=0
+    if platform not in ['Python', 'python', 'p']: s+=1
+    Gs = [['z', 'z', i,i+1] for i in range(s,N-1+s)]
+    Fs = [[f, i] for i in range(s,N+s) for f in fields]
+    return Gs, Fs
+
+def Heisenberg_Ansatz(N, fields=['z'] ,platform = 'Python'): 
+    s=0
+    if platform not in ['Python', 'python', 'p']: s+=1
+    Gs = [[a, a, i,i+1] for a in ['x', 'y', 'z'] for i in range(s,N-1+s)]
+    Fs = [[f, i] for i in range(s,N+s) for f in fields]
+    return Gs, Fs
+
+def General_SpinSpin_Ansatz(N, Graph, fields=['z'], directions=['x'], platform = 'Python'):
+    s=0
+    if platform not in ['Python', 'python', 'p']: s+=1
+    Gs = [[a, a, g[0],g[1]] for a in directions for g in Graph]
+    Fs = [[f, i] for i in range(s,N+s) for f in fields]
+    return Gs, Fs
+
+def HIsing_VQE(N,direction = ['x'], field = ['z'], h=0.5, platform='Python'):
+    s=0
+    if platform not in ['Python', 'python', 'p']: s+=1
+    Hout = [[1.0, d, d, i,i+1] for d in direction for i in range(s,N-1+s)]
+    Hout+= [[h, f, i] for f in field for i in range(s, N+s)]
+    return Hout
